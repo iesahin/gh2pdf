@@ -106,6 +106,31 @@ of rclone:
 GITHUB_TOKEN=ghp_... gh2pdf convert https://github.com/owner/repo/issues/42
 ```
 
+## Deploying on a Debian VPS
+
+`deploy/deploy.sh` sets up everything on a fresh Debian server: pandoc,
+typst, the Libertinus fonts, a Rust toolchain, a release build of gh2pdf, a
+hardened systemd service running as a dedicated `gh2pdf` user, and an nginx
+reverse proxy (with a Let's Encrypt certificate via certbot when `--email`
+is given — GitHub requires HTTPS for webhooks):
+
+```bash
+sudo ./deploy.sh --domain gh2pdf.example.com --email you@example.com
+```
+
+The first run stops short of starting the service and tells you what to
+fill in:
+
+1. `/etc/gh2pdf/gh2pdf.env` — App ID and webhook secret
+2. `/etc/gh2pdf/private-key.pem` — the App's private key
+3. `systemctl start gh2pdf`, then check `https://<domain>/healthz`
+
+The script is idempotent: re-running it pulls the latest branch, rebuilds,
+and restarts the service, without touching your `gh2pdf.env` or the
+certbot-managed nginx site. Options: `--port` (default 8080), `--branch`
+(default `main`), `--repo-url`. nginx exposes only `/webhook` and
+`/healthz`; everything else returns 404.
+
 ## Building
 
 ```bash

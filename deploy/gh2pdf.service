@@ -1,0 +1,27 @@
+[Unit]
+Description=gh2pdf GitHub App webhook server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gh2pdf
+Group=gh2pdf
+EnvironmentFile=/etc/gh2pdf/gh2pdf.env
+ExecStart=/usr/local/bin/gh2pdf serve
+Restart=on-failure
+RestartSec=5
+
+# Hardening. Typst downloads its packages into the cache directory on first
+# use, and the PDF pipeline works in private /tmp scratch directories.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=gh2pdf
+CacheDirectory=gh2pdf
+Environment=HOME=%S/gh2pdf
+Environment=XDG_CACHE_HOME=%C/gh2pdf
+
+[Install]
+WantedBy=multi-user.target

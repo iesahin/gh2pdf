@@ -1,0 +1,31 @@
+# Example compose setup for the gh2pdf webhook server.
+#
+#   1. Copy deploy/gh2pdf.env.example to gh2pdf.env and fill it in
+#      (leave GH2PDF_PRIVATE_KEY unset; it is provided as a secret below).
+#   2. Put the GitHub App's private key next to this file as private-key.pem.
+#   3. docker compose up -d
+#
+# Terminate TLS in front of this (nginx, Caddy, Traefik, ...) — GitHub
+# webhooks require HTTPS.
+
+services:
+  gh2pdf:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file: gh2pdf.env
+    environment:
+      GH2PDF_PRIVATE_KEY: /run/secrets/github-app-key
+    secrets:
+      - github-app-key
+    volumes:
+      # Persist typst's package cache across container recreations.
+      - typst-cache:/home/gh2pdf/.cache
+
+secrets:
+  github-app-key:
+    file: ./private-key.pem
+
+volumes:
+  typst-cache:

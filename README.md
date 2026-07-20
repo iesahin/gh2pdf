@@ -106,6 +106,30 @@ of rclone:
 GITHUB_TOKEN=ghp_... gh2pdf convert https://github.com/owner/repo/issues/42
 ```
 
+## Running with Docker
+
+The multi-stage `Dockerfile` builds the release binary and produces a
+Debian-slim image with pandoc, typst, and the Libertinus fonts baked in,
+running as a non-root user:
+
+```bash
+docker build -t gh2pdf .
+docker run -d -p 127.0.0.1:8080:8080 \
+  --env-file gh2pdf.env \
+  -e GH2PDF_PRIVATE_KEY=/run/secrets/github-app-key \
+  -v ./private-key.pem:/run/secrets/github-app-key:ro \
+  gh2pdf
+```
+
+Or use the included `docker-compose.yml`: copy
+`deploy/gh2pdf.env.example` to `gh2pdf.env`, fill in the App ID and
+webhook secret, drop the App's private key next to it as
+`private-key.pem`, and run `docker compose up -d`. The container binds
+to localhost only — put nginx, Caddy, or Traefik in front for TLS, since
+GitHub webhooks require HTTPS. Pandoc/typst versions can be overridden at
+build time with `--build-arg PANDOC_VERSION=... --build-arg
+TYPST_VERSION=...`.
+
 ## Deploying on a Debian VPS
 
 `deploy/deploy.sh` sets up everything on a fresh Debian server: pandoc,

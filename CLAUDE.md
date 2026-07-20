@@ -24,6 +24,9 @@ cargo run -- serve --app-id <id> --private-key key.pem --webhook-secret <secret>
 
 # One-shot conversion with a PAT
 GITHUB_TOKEN=... cargo run -- convert <github-issue-or-pr-url>
+
+# Container image (bundles pandoc, typst, fonts)
+docker build -t gh2pdf .
 ```
 
 CI runs fmt, clippy (`-D warnings`), `cargo build --release`, and `cargo test` on push and PRs.

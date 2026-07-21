@@ -1,0 +1,9 @@
+target/
+.git/
+.github/
+deploy/
+*.pdf
+*.typ
+.env
+README.md
+CLAUDE.md

@@ -1,0 +1,8 @@
+/target
+.env
+*.pdf
+*.typ
+
+# Local docker-compose configuration (secrets)
+/gh2pdf.env
+/private-key.pem

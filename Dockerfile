@@ -28,7 +28,7 @@ ARG TYPST_VERSION=0.13.1
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl xz-utils fonts-libertinus; \
+        ca-certificates curl xz-utils fonts-linuxlibertine; \
     case "$TARGETARCH" in \
         amd64) TYPST_ARCH=x86_64 ;; \
         arm64) TYPST_ARCH=aarch64 ;; \

@@ -42,7 +42,7 @@ impl Default for PdfOptions {
             timezone_offset_hours: 3,
             template_path: None,
             paper: "a4".to_string(),
-            font: "Libertinus Serif".to_string(),
+            font: "Linux Libertine O".to_string(),
             font_size_pt: 11,
             link_description: true,
         }

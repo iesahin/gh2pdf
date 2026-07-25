@@ -79,7 +79,7 @@ apt-get install -y -qq \
     nginx certbot python3-certbot-nginx \
     curl git xz-utils ca-certificates \
     build-essential pkg-config \
-    fonts-libertinus
+    fonts-linuxlibertine
 
 # --- pandoc (Debian's package can predate the Typst writer) ----------------
 

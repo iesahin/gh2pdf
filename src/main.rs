@@ -57,7 +57,7 @@ struct PdfArgs {
     paper: String,
 
     /// Text font for the built-in template.
-    #[arg(long, env = "GH2PDF_FONT", default_value = "Libertinus Serif")]
+    #[arg(long, env = "GH2PDF_FONT", default_value = "Linux Libertine O")]
     font: String,
 
     /// Font size in points for the built-in template.

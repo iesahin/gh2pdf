@@ -72,7 +72,7 @@ The parameters used to produce PDFs are set on the command line (or via
 | `--timezone-offset` | `GH2PDF_TZ_OFFSET` | `3` | Hours from UTC for timestamps |
 | `--template` | `GH2PDF_TEMPLATE` | built-in | Typst preamble template path |
 | `--paper` | `GH2PDF_PAPER` | `a4` | Paper size of the built-in template |
-| `--font` | `GH2PDF_FONT` | `Libertinus Serif` | Font of the built-in template |
+| `--font` | `GH2PDF_FONT` | `Linux Libertine O` | Font of the built-in template |
 | `--font-size` | `GH2PDF_FONT_SIZE` | `11` | Font size (pt) of the built-in template |
 | `--no-description-link` | `GH2PDF_NO_DESCRIPTION_LINK` | off | Don't touch the description |
 
@@ -91,7 +91,7 @@ omit_user = "iesahin"
 include_diff = false
 timezone_offset_hours = 0
 paper = "us-letter"
-font = "Libertinus Serif"
+font = "Linux Libertine O"
 font_size_pt = 10
 link_description = true
 ```
@@ -109,7 +109,7 @@ GITHUB_TOKEN=ghp_... gh2pdf convert https://github.com/owner/repo/issues/42
 ## Running with Docker
 
 The multi-stage `Dockerfile` builds the release binary and produces a
-Debian-slim image with pandoc, typst, and the Libertinus fonts baked in,
+Debian-slim image with pandoc, typst, and the Linux Libertine fonts baked in,
 running as a non-root user:
 
 ```bash
@@ -133,7 +133,7 @@ TYPST_VERSION=...`.
 ## Deploying on a Debian VPS
 
 `deploy/deploy.sh` sets up everything on a fresh Debian server: pandoc,
-typst, the Libertinus fonts, a Rust toolchain, a release build of gh2pdf, a
+typst, the Linux Libertine fonts, a Rust toolchain, a release build of gh2pdf, a
 hardened systemd service running as a dedicated `gh2pdf` user, and an nginx
 reverse proxy (with a Let's Encrypt certificate via certbot when `--email`
 is given — GitHub requires HTTPS for webhooks):

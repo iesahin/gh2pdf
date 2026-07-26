@@ -708,6 +708,48 @@ pub mod mock {
 mod tests {
     use super::*;
 
+    // A throwaway 2048-bit RSA key, generated with `openssl genrsa -traditional
+    // 2048`, used only to exercise EncodingKey/jsonwebtoken signing in tests.
+    const TEST_RSA_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAns6Be90E/5eDzcwHmHEVduH5BikbIxeQ3ndqGQzibear26Do
+BRB1EehF/xgB155+1THE6+g6RFFTtpSRNNXcKS/7SnFgItHO2XF2YlLKp69yR3Gh
+wrno6/ZlaPN4b4yMBUPCDk6dfSWZYHXCl5YpXEarrJTAtHbsBrtXmNrEd3mnjFM1
++QbYBw/NBoI3nrR+JIFeUEULWe0PGGcI3NtqfwUTq4+FVOPLqY+zYnpwzV0Vtloy
+g1pIUgIgn1aNBiYKlLATvvwRCrqjdfpNK3afZHtm8Rz78z79NZz5MDCm3Xt38YcZ
+SK/kAOR4jWxNu4uv2ZPl56LmT4kCKX0lS5xCKwIDAQABAoIBAAe3cBpFMJd81MY8
+ukfBgvH+Y/vVJoDrhboRomGqOxxs/3/SD0QjuxSOLUyKbZh9FpukafWumJo2O3Od
+P3sKQ0LrFnJVFP9MI5l0RnTbogZI46wuDNap8vP4SpAxeHIvKaSd2MGaN1Pb7lp+
+DmEQRl05/+CIb961Ap4HH2gJhU9q0cwlmcVaVVBhZT5pLK2/SHG0yFOu7Pu9HJ0w
+BWg69/tJqwxvBKDRQS4OXxS/8YsXd0g7ksKrAWO/TnmATrvfmHF51o545majC6mG
+5Wb6DKZz5I+9tOOrVBomL5L0zRKfWNZVS9lEJ8aR0tqJWKxGLMLRoTgr0osW3Ygx
+GhaTRnECgYEAznpwy/2FmBOpXTBJOrNj8xraUYg0dCO4bKO3E4jz3rEsAGWe7VrL
+UuqQzRrN+aBz3EKk6mMOsks5kLiZjlPrSt9kVVybmMT/u8lIlw+ScmIQrseEqb+O
+Q20oGXdZ3UrHwNMDeIvndX+93SEK2ytObCrK785gFJXpLZUyTbh7VxsCgYEAxOUT
+VmlO8+zpdim2q2kgiQdiJ1AQNyxj9KFAnIR4Ot8eoBEoqQhfxvrr/zsr0aaerGSQ
+/IptlgvfVay28mHQSbDaEgtwb/L5ORAhlDHhtrdeszUwkXAqdCCe3AM/2p8rN6W3
+6BP3A5GK0ZOsy7SgtAcFaTt2nOqWvJQUoxs9IjECgYEAlhYeY8lXEKJKG/j7YfYA
+EzhTtaxCJKHKbv3aGBMW4ar7hxZXHcU/wnfK5aw0SN2/Gj4/TjjO9/8CSxZEWFbb
+08LqVbpJSBT6p2+6mkOxef+ajNFut00MhiqUWV6OLfMrnBhGj5tyldBTHKfmEkY6
+bRn2BbaH1K7bnkyzEhelYD0CgYAyT35zdBEyjvTQtrPwdLpViUdxWCnsjzEzTwjd
+dZPrJxwCNqA3IOaoR3GKFCqMNZER59iMTyrVTk9Q6wMMSCYazk/KkJW4ZVN9WzvZ
+TC2qrIxMKmkwoIKYjcVJ3qKwUD+Qxo2JhaB2jvfzuVJL8umlVq3xR7p1OhQuN4BW
+dR1X4QKBgBJWMbY2syN4Bo8QjYsj+exK7OyFI2HaLI9NceWmULTIrgXBCo/sqyjD
+C7vsrPf86/vPs8qYcYEx6wptUMlYUYQ0ooE4msg5VTr5iXMbHkkItwylWs5aiSVn
+M52l/Si9+gn03soMPRNvRzIQaDU5cFqTPoX1db2RydXmCZBCthMM
+-----END RSA PRIVATE KEY-----";
+
+    // Regression test: jsonwebtoken 10 dropped its bundled crypto backend and
+    // panics at signing time ("Could not automatically determine the
+    // process-level CryptoProvider") unless a backend feature is enabled in
+    // Cargo.toml. Cargo won't catch a missing feature; only exercising the
+    // signing path does.
+    #[test]
+    fn test_app_jwt_signs_without_crypto_provider_panic() {
+        let auth = AppAuth::new("123456".to_string(), TEST_RSA_PEM.as_bytes()).unwrap();
+        let jwt = auth.app_jwt().unwrap();
+        assert_eq!(jwt.split('.').count(), 3);
+    }
+
     #[test]
     fn test_parse_issue_url() {
         assert_eq!(

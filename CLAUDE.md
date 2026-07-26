@@ -15,6 +15,9 @@ cargo test
 # Test a single test by name
 cargo test test_upsert_pdf_link
 
+# Test the deployment script's helpers (shell)
+deploy/tests/deploy_sh_test.sh
+
 # Lint and format (fix all warnings before committing)
 cargo clippy --all-targets
 cargo fmt

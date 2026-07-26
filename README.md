@@ -151,9 +151,12 @@ fill in:
 
 The script is idempotent: re-running it pulls the latest branch, rebuilds,
 and restarts the service, without touching your `gh2pdf.env` or the
-certbot-managed nginx site. Options: `--port` (default 8080), `--branch`
-(default `main`), `--repo-url`. nginx exposes only `/webhook` and
-`/healthz`; everything else returns 404.
+certbot-managed nginx site. Changing `--domain` regenerates the nginx site
+(the previous one is kept as `/etc/nginx/sites-available/gh2pdf.bak.<timestamp>`),
+and a certificate that was issued but never installed — certbot's "Could not
+install certificate" — is installed on the next run. Options: `--port`
+(default 8080), `--branch` (default `main`), `--repo-url`. nginx exposes only
+`/webhook` and `/healthz`; everything else returns 404.
 
 ## Building
 

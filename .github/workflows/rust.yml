@@ -36,3 +36,6 @@ jobs:
 
     - name: Test
       run: cargo test
+
+    - name: Deploy script tests
+      run: deploy/tests/deploy_sh_test.sh

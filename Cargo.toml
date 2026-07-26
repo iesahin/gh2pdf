@@ -1,6 +1,6 @@
 [package]
 name = "gh2pdf"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "A GitHub App that converts issues and pull requests to PDFs and publishes them as release assets"
 license = "MIT"
@@ -22,7 +22,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 dotenv = "0.15"
 hex = "0.4"
 hmac = "0.12"
-jsonwebtoken = "10"
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
 log = "0.4"
 pretty_env_logger = "0.5"
 regex = "1"

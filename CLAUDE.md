@@ -12,6 +12,10 @@ cargo build --release
 # Test all
 cargo test
 
+# Build/test the rendering library alone (what inboxbot depends on)
+cargo build --no-default-features
+cargo test --no-default-features
+
 # Test a single test by name
 cargo test test_upsert_pdf_link
 
@@ -32,16 +36,19 @@ GITHUB_TOKEN=... cargo run -- convert <github-issue-or-pr-url>
 docker build -t gh2pdf .
 ```
 
-CI runs fmt, clippy (`-D warnings`), `cargo build --release`, and `cargo test` on push and PRs.
+CI runs fmt, clippy (`-D warnings`), `cargo build --release`, and `cargo test`
+on push and PRs, plus clippy and tests with `--no-default-features` so the
+rendering library keeps standing on its own.
 
 ## Architecture
 
 gh2pdf is a GitHub App that converts issues and PRs to PDFs and publishes
 them as assets of a dedicated GitHub release, keeping a link to the PDF in
-the issue/PR description. The rendering pipeline (Markdown assembly →
-pandoc → Typst post-processing → typst compile) is ported from
-[inboxbot](https://github.com/iesahin/inboxbot) so the output format is
-identical.
+the issue/PR description. The rendering half is also the PDF library
+[inboxbot](https://github.com/iesahin/inboxbot) uses — inboxbot renders its
+GitHub issues, daily notes, web extracts and discussion threads through
+`gh2pdf::pdf`, so both applications produce byte-identical output from the
+same code.
 
 ### Module map (`src/`)
 
@@ -51,10 +58,18 @@ identical.
 | `config.rs` | `PdfOptions` (every PDF-production parameter) + `PdfOptionsPatch` (per-repo `.github/gh2pdf.toml` overrides) |
 | `github.rs` | `GitHubProvider` trait hiding all GitHub access; `GitHubClient` (reqwest REST); `AppAuth` (App JWT → cached installation tokens); deep `publish_release_asset` (ensure release, purge stale assets, upload); `mock::MockGitHubClient` for tests |
 | `models.rs` | `UnifiedComment`, `IssueContext`, `PRContext`, `PRDiff`; REST response and webhook payload types |
-| `pdf.rs` | PDF pipeline: `assemble_markdown` → `compile_content_to_pdf` (pandoc → typst); `post_process_typst` (page breaks, mermaid, remote image download); `build_preamble` |
+| `pdf.rs` | PDF pipeline: `assemble_markdown` → `compile_content_to_pdf` (pandoc → typst); `post_process_typst` (page breaks, mermaid, remote image download); `build_preamble`; `slugify`/`url_to_image_filename` naming helpers; failures carry the tool's own diagnostics (`tool_failure_message`) |
 | `pipeline.rs` | `convert_and_publish`: fetch context → render → publish asset → upsert description link; `effective_options` merges repo config over server defaults |
-| `description.rs` | Idempotent `upsert_pdf_link` using `<!-- gh2pdf:begin/end -->` markers |
+| `description.rs` | The `<!-- gh2pdf:begin/end -->` link block: idempotent `upsert_pdf_link` writes it, `extract` reads the PDF URL back out |
 | `webhook.rs` | axum server: HMAC signature verification, event relevance filter, own-bot loop prevention, per-issue serialisation locks |
+
+### Cargo features
+
+`default = ["server"]`. The `server` feature carries everything beyond
+rendering — `github`, `pipeline`, `webhook` and the binary — so a consumer
+that only wants PDFs depends on the crate with `default-features = false`
+and never pulls in axum, clap or jsonwebtoken. `config`, `description`,
+`models` and `pdf` are always compiled.
 
 ### Key design decisions
 
@@ -70,6 +85,9 @@ identical.
   serialised; each run fetches fresh state so the last run converges.
 - **Scratch directories** — each conversion works in its own temp directory,
   so concurrent conversions never share intermediate files.
+- **Errors quote the tool** — a failing pandoc or typst run comes back as an
+  error carrying that tool's own diagnostics, so a caller relaying the error
+  (inboxbot sends it to a Telegram chat) says what actually broke.
 
 ## Engineering standards
 

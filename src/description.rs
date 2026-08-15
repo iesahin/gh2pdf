@@ -1,7 +1,22 @@
-//! Idempotent management of the PDF link block inside an issue/PR description.
+//! The `gh2pdf` block: a marker-delimited section in a GitHub issue or PR
+//! description that records where the rendered PDF lives.
+//!
+//! ```text
+//! <!-- gh2pdf:begin -->
+//! 📄 [PDF](https://github.com/owner/repo/releases/download/gh2pdf/name.pdf) — updated 2026-07-26 18:19 UTC
+//! <!-- gh2pdf:end -->
+//! ```
+//!
+//! [`upsert_pdf_link`] writes the block idempotently; [`extract`] reads the
+//! URL back out of it, for consumers that want to reuse an already rendered
+//! PDF instead of compiling a new one.
 
-const BEGIN_MARKER: &str = "<!-- gh2pdf:begin -->";
-const END_MARKER: &str = "<!-- gh2pdf:end -->";
+use regex::Regex;
+
+/// Opening marker of the block.
+pub const BEGIN_MARKER: &str = "<!-- gh2pdf:begin -->";
+/// Closing marker of the block.
+pub const END_MARKER: &str = "<!-- gh2pdf:end -->";
 
 /// Inserts or replaces the gh2pdf link block in `body`.
 ///
@@ -26,6 +41,30 @@ pub fn upsert_pdf_link(body: &str, pdf_url: &str, updated_at: &str) -> String {
     } else {
         format!("{}\n\n{}", body.trim_end(), block)
     }
+}
+
+/// Returns the byte range of the `gh2pdf` block within `body`, markers
+/// included, or `None` when the body carries no complete block.
+fn block_span(body: &str) -> Option<std::ops::Range<usize>> {
+    let start = body.find(BEGIN_MARKER)?;
+    let end_start = body[start..].find(END_MARKER)? + start;
+    Some(start..end_start + END_MARKER.len())
+}
+
+/// Extracts the PDF URL recorded in the `gh2pdf` block of an issue body.
+/// Returns `None` when there is no block or it contains no URL.
+///
+/// The PDF is recorded as a Markdown link; a bare URL is accepted as a
+/// fallback so a hand-edited block still resolves.
+pub fn extract(body: &str) -> Option<String> {
+    let markdown_link = Regex::new(r"\]\((https?://[^)\s]+)\)").expect("static regex is valid");
+    let bare_url = Regex::new(r"https?://[^\s)\]]+").expect("static regex is valid");
+
+    let inner = &body[block_span(body)?];
+    markdown_link
+        .captures(inner)
+        .map(|c| c[1].to_string())
+        .or_else(|| bare_url.find(inner).map(|m| m.as_str().to_string()))
 }
 
 #[cfg(test)]
@@ -64,5 +103,58 @@ mod tests {
         let out = upsert_pdf_link("", "https://x/y.pdf", "2026-07-19 12:00 UTC");
         assert!(out.starts_with(BEGIN_MARKER));
         assert!(out.ends_with(END_MARKER));
+    }
+
+    const URL: &str =
+        "https://github.com/iesahin/inboxbot/releases/download/gh2pdf/inboxbot-93-fix.pdf";
+
+    /// The exact shape [`upsert_pdf_link`] writes.
+    fn block(url: &str) -> String {
+        format!(
+            "{}\n📄 [PDF]({}) — updated 2026-07-26 18:19 UTC\n{}",
+            BEGIN_MARKER, url, END_MARKER
+        )
+    }
+
+    #[test]
+    fn extract_reads_back_what_upsert_wrote() {
+        let body = upsert_pdf_link("Some description.", URL, "2026-07-26 18:19 UTC");
+        assert_eq!(extract(&body).as_deref(), Some(URL));
+    }
+
+    #[test]
+    fn extract_reads_a_block_followed_by_more_text() {
+        let body = format!("Description.\n\n{}\n\nTrailing note.", block(URL));
+        assert_eq!(extract(&body).as_deref(), Some(URL));
+    }
+
+    #[test]
+    fn extract_ignores_links_outside_the_block() {
+        let body = "See [the docs](https://example.com/manual.pdf) for details.";
+        assert_eq!(extract(body), None);
+    }
+
+    #[test]
+    fn extract_returns_none_without_a_closing_marker() {
+        let body = format!("{}\n📄 [PDF]({})", BEGIN_MARKER, URL);
+        assert_eq!(extract(&body), None);
+    }
+
+    #[test]
+    fn extract_returns_none_for_a_plain_description() {
+        assert_eq!(extract("Just an ordinary issue body."), None);
+        assert_eq!(extract(""), None);
+    }
+
+    #[test]
+    fn extract_accepts_a_bare_url_in_the_block() {
+        let body = format!("{}\n{}\n{}", BEGIN_MARKER, URL, END_MARKER);
+        assert_eq!(extract(&body).as_deref(), Some(URL));
+    }
+
+    #[test]
+    fn extract_returns_none_for_an_empty_block() {
+        let body = format!("{}\n{}", BEGIN_MARKER, END_MARKER);
+        assert_eq!(extract(&body), None);
     }
 }

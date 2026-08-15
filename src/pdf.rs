@@ -51,7 +51,7 @@ pub fn escape_typst_string(text: &str) -> String {
 ///
 /// The query string and the `#fragment` are cut off the basename so the local
 /// file keeps the extension of the actual image.
-fn url_to_image_filename(url: &str) -> String {
+pub fn url_to_image_filename(url: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut hasher);
@@ -69,16 +69,50 @@ fn url_to_image_filename(url: &str) -> String {
     format!("{:08x}_{}", hash & 0xFFFF_FFFF, basename)
 }
 
-/// Generates a slug from a string (lowercase, replace non-alphanumeric with hyphens).
+/// Upper bound on a slug's byte length. Slugs feed into filenames like
+/// `<repo>-<number>-<slug>.pdf` or `<slug>-final.typ`; keeping the slug itself
+/// well under the common 255-byte filesystem name limit leaves room for such
+/// prefixes/suffixes even for long GitHub issue titles or web page titles.
+const MAX_SLUG_LEN: usize = 80;
+
+/// Generates a slug from a string (lowercase, replace non-alphanumeric with
+/// hyphens), truncated to [`MAX_SLUG_LEN`] bytes at a word boundary so it
+/// stays safe to use in filenames regardless of input length.
 pub fn slugify(text: &str) -> String {
-    text.to_lowercase()
+    let full = text
+        .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+
+    truncate_slug(&full, MAX_SLUG_LEN)
+}
+
+/// Truncates `slug` to at most `max_bytes` bytes without splitting a UTF-8
+/// character, then backs up to the last `-` (if any) so the result doesn't
+/// end mid-word.
+fn truncate_slug(slug: &str, max_bytes: usize) -> String {
+    if slug.len() <= max_bytes {
+        return slug.to_string();
+    }
+
+    let mut end = 0;
+    for (i, c) in slug.char_indices() {
+        if i + c.len_utf8() > max_bytes {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    let cut = &slug[..end];
+
+    match cut.rfind('-') {
+        Some(idx) if idx > 0 => cut[..idx].to_string(),
+        _ => cut.to_string(),
+    }
 }
 
 /// Groups comments into buckets based on a 2-minute temporal gap.
@@ -285,6 +319,54 @@ pub fn fix_link_spacing(typ_content: &str, input_format: &str) -> String {
     }
 }
 
+/// How much of a failing tool's own output travels with the error. The first
+/// diagnostics are the actionable ones (typst reports errors in source order),
+/// and the whole message still has to fit in a chat message when a caller
+/// relays it to whoever asked for the PDF.
+const MAX_TOOL_ERROR_CHARS: usize = 1200;
+
+/// Builds the error message for a failed external command, carrying the tool's
+/// own diagnostics — typst's `error: …` lines, pandoc's parse errors — instead
+/// of leaving them in the server's console: whoever asked for the PDF is the
+/// one who needs to read them.
+fn tool_failure_message(what: &str, exit_code: Option<i32>, stderr: &str, stdout: &str) -> String {
+    let details = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    let code = match exit_code {
+        Some(c) => format!(" (exit code {})", c),
+        None => String::new(),
+    };
+    if details.is_empty() {
+        return format!("{} failed{}", what, code);
+    }
+
+    let mut kept: String = details.chars().take(MAX_TOOL_ERROR_CHARS).collect();
+    if kept.chars().count() < details.chars().count() {
+        kept.push_str("\n… (output truncated)");
+    }
+    format!("{} failed{}:\n{}", what, code, kept)
+}
+
+/// Runs an external step of the PDF pipeline, turning a non-zero exit into an
+/// error that quotes what the tool printed.
+async fn run_pipeline_step(command: &mut Command, what: &str) -> Result<()> {
+    let message = match command.output().await {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => tool_failure_message(
+            what,
+            output.status.code(),
+            &String::from_utf8_lossy(&output.stderr),
+            &String::from_utf8_lossy(&output.stdout),
+        ),
+        Err(e) => format!("{} could not be started: {}", what, e),
+    };
+    log::error!("PDF: {}", message);
+    bail!(message)
+}
+
 /// Compiles content to PDF using Pandoc and Typst.
 ///
 /// All intermediate files (Markdown/HTML input, Typst sources, downloaded
@@ -332,21 +414,17 @@ pub async fn compile_content_to_pdf(
         input_format.to_string()
     };
 
-    let status = Command::new("pandoc")
-        .args([
+    run_pipeline_step(
+        Command::new("pandoc").args([
             "-f",
             &format_arg,
             &input_path.to_string_lossy(),
             "-o",
             &typ_path.to_string_lossy(),
-        ])
-        .status()
-        .await;
-
-    match status {
-        Ok(s) if s.success() => {}
-        _ => bail!("Pandoc conversion failed for format {}", input_format),
-    }
+        ]),
+        &format!("Pandoc conversion of format {}", input_format),
+    )
+    .await?;
 
     // Prepend preamble and fix link spacing
     log::debug!("PDF: Prepending preamble and fixing link spacing");
@@ -370,19 +448,17 @@ pub async fn compile_content_to_pdf(
 
     // Typst compile
     log::debug!("PDF: Running typst compile for {}", filename);
-    let status = Command::new("typst")
-        .args([
+    run_pipeline_step(
+        Command::new("typst").args([
             "compile",
             &final_typ_path.to_string_lossy(),
             &pdf_path.to_string_lossy(),
-        ])
-        .status()
-        .await;
+        ]),
+        "Typst compilation",
+    )
+    .await?;
 
-    match status {
-        Ok(s) if s.success() => Ok(pdf_path),
-        _ => bail!("Typst compilation failed"),
-    }
+    Ok(pdf_path)
 }
 
 /// Returns the body of the Typst content block that starts at `start`, plus
@@ -710,7 +786,67 @@ pub async fn post_process_typst(
                 continue;
             }
 
-            // 2. Regular HTTP download for everything else
+            // 2. Fall back to the `gh` CLI for release assets the API call
+            //    could not fetch (a token scoped to another repository, or no
+            //    token at all while the user is logged in to `gh`). A missing
+            //    `gh` just fails the command and we move on to plain HTTP.
+            if let Some(caps) = gh_release_re.captures(&url) {
+                let owner = &caps[1];
+                let repo = &caps[2];
+                let tag = &caps[3];
+                let filename = &caps[4];
+
+                log::debug!(
+                    "PDF: Falling back to gh cli for release asset: {}/{} tag {} file {}",
+                    owner,
+                    repo,
+                    tag,
+                    filename
+                );
+
+                let gh_status = Command::new("gh")
+                    .args([
+                        "release",
+                        "download",
+                        tag,
+                        "-p",
+                        filename,
+                        "--dir",
+                        &image_dir.to_string_lossy(),
+                        "--repo",
+                        &format!("{}/{}", owner, repo),
+                        "--clobber",
+                    ])
+                    .status()
+                    .await;
+
+                if let Ok(status) = gh_status {
+                    if status.success() {
+                        log::debug!("PDF: Successfully downloaded using gh cli: {}", filename);
+
+                        let downloaded_file = image_dir.join(filename);
+                        if downloaded_file.exists() {
+                            if let Err(e) = fs::rename(&downloaded_file, &local_path).await {
+                                log::warn!(
+                                    "PDF: Could not rename gh downloaded file {:?} to {:?}: {}",
+                                    downloaded_file,
+                                    local_path,
+                                    e
+                                );
+                            } else {
+                                url_to_local.insert(url.to_string(), local_filename.clone());
+                                is_downloaded = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if is_downloaded {
+                continue;
+            }
+
+            // 3. Regular HTTP download for everything else
             let mut req = client
                 .get(&url)
                 .header("Accept", "image/*, application/octet-stream, */*;q=0.8");
@@ -868,6 +1004,62 @@ mod tests {
         assert_eq!(slugify("Hello World!"), "hello-world");
         assert_eq!(slugify("2026-05-10: New Feature"), "2026-05-10-new-feature");
         assert_eq!(slugify("---Multiple---Dashes---"), "multiple-dashes");
+    }
+
+    #[test]
+    fn test_slugify_truncates_long_titles() {
+        let title = "word ".repeat(100); // far past MAX_SLUG_LEN once slugified
+        let slug = slugify(&title);
+        assert!(
+            slug.len() <= MAX_SLUG_LEN,
+            "slug of length {} exceeds MAX_SLUG_LEN",
+            slug.len()
+        );
+        assert!(!slug.ends_with('-'));
+        assert!(slug.starts_with("word-word"));
+    }
+
+    #[test]
+    fn test_slugify_truncates_without_splitting_utf8_chars() {
+        // Turkish text with multi-byte characters right at the truncation boundary.
+        let title = "çğıöşü ".repeat(30);
+        let slug = slugify(&title); // must not panic on a mid-character split
+        assert!(slug.len() <= MAX_SLUG_LEN);
+        assert!(slug.is_char_boundary(slug.len()));
+    }
+
+    /// A bare "Typst compilation failed" told the user nothing about what in
+    /// the document typst choked on; the tool's own diagnostics travel with
+    /// the error now.
+    #[test]
+    fn tool_failure_message_quotes_the_tools_diagnostics() {
+        let message = tool_failure_message(
+            "Typst compilation",
+            Some(1),
+            "error: unknown variable: mermaid\n  ┌─ /tmp/a-final.typ:12:2",
+            "",
+        );
+
+        assert!(message.starts_with("Typst compilation failed (exit code 1):"));
+        assert!(message.contains("error: unknown variable: mermaid"));
+    }
+
+    #[test]
+    fn tool_failure_message_falls_back_to_stdout_and_truncates() {
+        let noise = "e".repeat(MAX_TOOL_ERROR_CHARS + 50);
+        let message = tool_failure_message("Pandoc conversion", None, "   ", &noise);
+
+        assert!(message.starts_with("Pandoc conversion failed:"));
+        assert!(message.ends_with("… (output truncated)"));
+        assert!(message.len() < noise.len() + 100);
+    }
+
+    #[test]
+    fn tool_failure_message_without_output_still_names_the_step() {
+        assert_eq!(
+            tool_failure_message("Typst compilation", None, "", ""),
+            "Typst compilation failed"
+        );
     }
 
     fn comment(ts: &str, username: &str, body: &str, url: &str) -> UnifiedComment {

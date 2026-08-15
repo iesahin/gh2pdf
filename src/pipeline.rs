@@ -72,10 +72,7 @@ pub async fn convert_and_publish(
     let output_name = format!("{}-{}-{}", context.repo, context.number, slug);
     let pdf_filename = format!("{}.pdf", output_name);
 
-    let link_str = format!(
-        "#link(\"{}\")[{}#{}]",
-        context.html_url, context.repo, context.number
-    );
+    let link_str = issue_link_field(&context);
     let author_field = author_field(&context, options.timezone_offset_hours);
     let preamble = pdf::build_preamble(&options, &context.title, &author_field, &link_str).await;
 
@@ -246,6 +243,21 @@ fn author_field(context: &IssueContext, tz_offset_hours: i32) -> String {
     }
 }
 
+/// The PDF's date field: `repo#number`, linked to the issue/PR page.
+///
+/// The label is Typst markup, so the `#` in front of the number (and any
+/// markup character in the repository name) has to be escaped — an
+/// unescaped `#123` is read as a code expression and silently swallows the
+/// `#`.
+fn issue_link_field(context: &IssueContext) -> String {
+    format!(
+        "#link(\"{}\")[{}\\#{}]",
+        pdf::escape_typst_string(&context.html_url),
+        pdf::escape_typst_markup(&context.repo),
+        context.number
+    )
+}
+
 fn tempfile_dir(output_name: &str) -> Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join(format!("gh2pdf-{}-{}", output_name, std::process::id()));
     std::fs::create_dir_all(&dir).with_context(|| format!("creating work dir {:?}", dir))?;
@@ -386,6 +398,28 @@ mod tests {
 
         let opts = effective_options(mock, &PdfOptions::default(), "o", "r").await;
         assert_eq!(opts.release_tag, "gh2pdf");
+    }
+
+    #[test]
+    fn test_issue_link_field_escapes_the_number_sign() {
+        let ctx = IssueContext {
+            owner: "iesahin".into(),
+            repo: "xvc_repo".into(),
+            number: 550,
+            title: "T".into(),
+            body: String::new(),
+            html_url: "https://github.com/iesahin/xvc_repo/issues/550".into(),
+            comments: vec![],
+            is_pr: false,
+            pr_context: None,
+            updated_at: "2026-07-19T09:00:00+00:00".into(),
+        };
+        // Without the escapes Typst reads `#550` as a code expression and
+        // drops the `#`, and `_` starts emphasis.
+        assert_eq!(
+            issue_link_field(&ctx),
+            "#link(\"https://github.com/iesahin/xvc_repo/issues/550\")[xvc\\_repo\\#550]"
+        );
     }
 
     #[test]

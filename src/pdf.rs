@@ -13,6 +13,34 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::process::Command;
 
+/// Characters that carry markup meaning in a Typst content block and have to
+/// be backslash-escaped when plain text is spliced into one.
+const TYPST_MARKUP_SPECIALS: &[char] = &[
+    '\\', '#', '[', ']', '*', '_', '`', '$', '<', '>', '@', '=', '-', '+', '/', '~',
+];
+
+/// Escapes plain text so Typst renders it literally inside a content block
+/// (`[...]`).
+///
+/// Issue titles are arbitrary user text: a leading `#` starts a Typst code
+/// expression, `@name` is a bibliography reference, `<name>` a label, and so
+/// on — all of which abort the compilation instead of printing the character.
+pub fn escape_typst_markup(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if TYPST_MARKUP_SPECIALS.contains(&c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+/// Escapes plain text for use inside a Typst string literal (`"..."`).
+pub fn escape_typst_string(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Derives a deterministic, filesystem-safe image filename from a remote URL.
 ///
 /// The name is `<8-hex-hash>_<original-basename>`, where the hash covers the
@@ -20,6 +48,9 @@ use tokio::process::Command;
 /// - Same URL  → same filename on every run (idempotent, cache-friendly).
 /// - Different URLs that happen to share a basename → different filenames
 ///   (no collision counter needed, no in-memory state required).
+///
+/// The query string and the `#fragment` are cut off the basename so the local
+/// file keeps the extension of the actual image.
 fn url_to_image_filename(url: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -27,7 +58,7 @@ fn url_to_image_filename(url: &str) -> String {
     let hash = hasher.finish();
 
     let basename = url
-        .split('?')
+        .split(['?', '#'])
         .next()
         .unwrap_or(url)
         .rsplit('/')
@@ -166,6 +197,12 @@ pub fn assemble_markdown(
 /// Returns the Typst preamble for a document, with title, author and date
 /// (link) fields filled in.
 ///
+/// `title_str` and `author_str` are plain text and are escaped for the
+/// context the template puts them in (a content block for the title, a string
+/// literal for the author), so titles like `# xvc as a file server` cannot
+/// break the compilation. `date_str` is Typst markup produced by the caller
+/// (the pipeline passes a `#link(...)`) and is inserted verbatim.
+///
 /// When `options.template_path` points to a readable file it is used as the
 /// template; otherwise a built-in template (using the same `toffee-tufte`
 /// layout as inboxbot) is parameterised with the paper/font options.
@@ -190,8 +227,8 @@ pub async fn build_preamble(
         None => builtin_template(options),
     };
     template
-        .replace("TITLE_PLACEHOLDER", title_str)
-        .replace("AUTHOR_PLACEHOLDER", author_str)
+        .replace("TITLE_PLACEHOLDER", &escape_typst_markup(title_str))
+        .replace("AUTHOR_PLACEHOLDER", &escape_typst_string(author_str))
         .replace("DATE_PLACEHOLDER", date_str)
 }
 
@@ -224,6 +261,28 @@ pub fn preprocess_markdown(content: &str) -> String {
     let img_tag_re =
         Regex::new(r#"(?i)<img\s+[^>]*src=["']([^"']+)["'][^>]*>"#).expect("static regex is valid");
     img_tag_re.replace_all(content, "![image]($1)").to_string()
+}
+
+/// Removes the spacing artefacts Pandoc leaves around `#link(...)` calls.
+///
+/// Pandoc sometimes writes `#link(url) [text]`, which Typst renders with a
+/// space between the two; the argument list and the content block have to be
+/// adjacent.
+///
+/// Whitespace *before* a `#link` is only spurious for HTML input, where the
+/// source's own line breaks and indentation around `<a>` tags end up in the
+/// Typst output. In Markdown such whitespace is a real word separator, so
+/// removing it would glue the link to the preceding word.
+pub fn fix_link_spacing(typ_content: &str, input_format: &str) -> String {
+    let re_link_args = Regex::new(r"#link\(([^)]+)\)\s+\[").expect("static regex is valid");
+    let fixed = re_link_args.replace_all(typ_content, "#link($1)[");
+
+    if input_format == "html" {
+        let re_link_start = Regex::new(r"([^\w])\s+#link").expect("static regex is valid");
+        re_link_start.replace_all(&fixed, "$1#link").to_string()
+    } else {
+        fixed.to_string()
+    }
 }
 
 /// Compiles content to PDF using Pandoc and Typst.
@@ -291,21 +350,7 @@ pub async fn compile_content_to_pdf(
 
     // Prepend preamble and fix link spacing
     log::debug!("PDF: Prepending preamble and fixing link spacing");
-    let mut typ_content = fs::read_to_string(&typ_path).await?;
-
-    // Fix link spacing in Typst.
-    // Pandoc sometimes outputs "#link(url) [text]" which Typst renders with a space.
-    // We want to ensure it is "#link(url)[text]".
-    let re_link_args = Regex::new(r"#link\(([^)]+)\)\s+\[").expect("static regex is valid");
-    typ_content = re_link_args
-        .replace_all(&typ_content, "#link($1)[")
-        .to_string();
-
-    // Also remove leading spaces introduced by Pandoc before #link.
-    let re_link_start = Regex::new(r"([^\w])\s+#link").expect("static regex is valid");
-    typ_content = re_link_start
-        .replace_all(&typ_content, "$1#link")
-        .to_string();
+    let typ_content = fix_link_spacing(&fs::read_to_string(&typ_path).await?, input_format);
 
     // Post-process Typst content to handle remote images and fix broken links.
     // Images are downloaded next to the Typst source so it can reference them
@@ -340,6 +385,121 @@ pub async fn compile_content_to_pdf(
     }
 }
 
+/// Returns the body of the Typst content block that starts at `start`, plus
+/// the index just past its closing `]`. `None` when `start` is not a `[` or
+/// the block is unterminated.
+fn content_block_at(content: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = content.as_bytes();
+    if bytes.get(start) != Some(&b'[') {
+        return None;
+    }
+
+    // `[`, `]` and `\` are ASCII, so byte scanning never splits a character.
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&content[start + 1..i], i + 1));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Collects the labels the document actually defines.
+///
+/// Pandoc always writes a label at the end of a line — on its own after a
+/// heading, or after the `]`/`)` of a figure or block. Raw blocks are skipped:
+/// a `<html>` line inside a fenced code block is printed text, not a label,
+/// and mistaking it for one would keep a link that Typst then rejects.
+fn defined_labels(content: &str) -> HashSet<&str> {
+    let label_re = Regex::new(r"<([^<>\s]+)>$").expect("static regex is valid");
+    let mut labels = HashSet::new();
+    let mut in_raw_block = false;
+
+    for line in content.lines() {
+        let line = line.trim_end();
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            in_raw_block = !in_raw_block;
+            continue;
+        }
+        if in_raw_block {
+            continue;
+        }
+        if let Some(caps) = label_re.captures(line) {
+            let whole = caps.get(0).expect("group 0 always matches");
+            // `#link(<name>)` is a reference, not a definition.
+            if line[..whole.start()].ends_with('(') {
+                continue;
+            }
+            if let Some(name) = caps.get(1) {
+                labels.insert(name.as_str());
+            }
+        }
+    }
+    labels
+}
+
+/// Replaces links to undefined labels by their link text.
+///
+/// Pandoc turns a Markdown anchor link (`[text](#anchor)`) into a Typst label
+/// reference (`#link(<anchor>)[text]`). Typst aborts the compilation when the
+/// label is not defined in the document, which is the common case for issue
+/// bodies: they link to anchors of a README, of the rendered issue page, or
+/// of a heading that only exists in another comment. Anchors that *do* have a
+/// matching heading in the document are left alone so they stay clickable.
+fn resolve_label_links(content: &str) -> String {
+    let defined = defined_labels(content);
+
+    let link_re = Regex::new(r"#link\(<([^<>\s]+)>\)").expect("static regex is valid");
+    let mut resolved = String::with_capacity(content.len());
+    let mut copied_to = 0usize;
+
+    for caps in link_re.captures_iter(content) {
+        let whole = caps.get(0).expect("group 0 always matches");
+        let name = match caps.get(1) {
+            Some(m) => m.as_str(),
+            None => continue,
+        };
+        // Skip matches inside the body of an already-rewritten link.
+        if whole.start() < copied_to || defined.contains(name) {
+            continue;
+        }
+
+        resolved.push_str(&content[copied_to..whole.start()]);
+        match content_block_at(content, whole.end()) {
+            // `#[body]` keeps the text and stays an expression, so a `;`
+            // terminator Pandoc may have written after the block still binds
+            // to something.
+            Some((body, end)) => {
+                log::debug!("PDF: Dropping link to undefined anchor <{}>", name);
+                resolved.push_str("#[");
+                resolved.push_str(body);
+                resolved.push(']');
+                copied_to = end;
+            }
+            None => {
+                log::debug!("PDF: Dropping bare link to undefined anchor <{}>", name);
+                resolved.push_str("#[");
+                resolved.push_str(&escape_typst_markup(&format!("#{}", name)));
+                resolved.push(']');
+                copied_to = whole.end();
+            }
+        }
+    }
+
+    resolved.push_str(&content[copied_to..]);
+    resolved
+}
+
 /// Post-processes Typst content to fix Pandoc conversion artifacts and handle remote images.
 ///
 /// `image_dir` – directory where remote images are downloaded and stored;
@@ -368,7 +528,10 @@ pub async fn post_process_typst(
         })
         .to_string();
 
-    // 3. Convert mermaid code blocks to mmdr plugin calls.
+    // 3. Defuse links to anchors that do not exist in this document.
+    new_content = resolve_label_links(&new_content);
+
+    // 4. Convert mermaid code blocks to mmdr plugin calls.
     // Pandoc outputs mermaid blocks in typst as: ```mermaid ... ```
     // Or if it contains backticks, it uses 4 or 5 backticks.
     for i in (3..=5).rev() {
@@ -384,7 +547,7 @@ pub async fn post_process_typst(
         }
     }
 
-    // 4. Download remote images and replace URLs with local paths
+    // 5. Download remote images and replace URLs with local paths
     // Regex matches Typst image commands: image("https://...") or #image("https://...")
     // We match the URL and allow for optional trailing arguments inside image(...)
     let img_re = Regex::new(r#"image\("([^"]+)"([^)]*)\)"#).expect("static regex is valid");
@@ -608,7 +771,13 @@ pub async fn post_process_typst(
                     format!(r#"image("{}"{})"#, local_filename, extra)
                 } else if url.starts_with("http") {
                     log::warn!("PDF: Replacing failed image download with link for {}", url);
-                    format!(r#"link("{}")[Image (Download Failed: {})]"#, url, url)
+                    // The URL is shown as text, so it has to be escaped: a
+                    // `#fragment` would otherwise start a Typst expression.
+                    format!(
+                        r#"link("{}")[Image (Download Failed: {})]"#,
+                        url,
+                        escape_typst_markup(url)
+                    )
                 } else {
                     format!(r#"image("{}"{})"#, url, extra)
                 }
@@ -643,6 +812,55 @@ mod tests {
         let processed = preprocess_markdown(content);
         assert!(processed.contains("![image](https://example.com/test.png)"));
         assert!(processed.contains("![image](https://example.com/test2.png)"));
+    }
+
+    #[test]
+    fn test_escape_typst_markup() {
+        // The reported failure: a title starting with a Markdown heading
+        // marker turned into a Typst code expression.
+        assert_eq!(
+            escape_typst_markup("# xvc as a file server"),
+            "\\# xvc as a file server"
+        );
+        assert_eq!(
+            escape_typst_markup("Fix [bug] in *foo* @user <tag> a_b $x$ 2-3 c/d ~e `f` +g =h \\i"),
+            "Fix \\[bug\\] in \\*foo\\* \\@user \\<tag\\> a\\_b \\$x\\$ 2\\-3 c\\/d \\~e \\`f\\` \
+             \\+g \\=h \\\\i"
+        );
+        assert_eq!(escape_typst_markup("plain title 123"), "plain title 123");
+    }
+
+    #[test]
+    fn test_escape_typst_string() {
+        assert_eq!(
+            escape_typst_string(r#"say "hi" \ there"#),
+            r#"say \"hi\" \\ there"#
+        );
+    }
+
+    #[test]
+    fn test_url_to_image_filename_strips_query_and_fragment() {
+        let name = url_to_image_filename("https://example.com/a/pic.png?jwt=abc#anchor");
+        assert!(name.ends_with("_pic.png"), "unexpected filename: {}", name);
+    }
+
+    #[test]
+    fn test_fix_link_spacing() {
+        // The argument list and the content block must be adjacent.
+        assert_eq!(
+            fix_link_spacing(r#"#link("https://x") [text]"#, "markdown"),
+            r#"#link("https://x")[text]"#
+        );
+        // Markdown: the space before the link separates words and stays.
+        assert_eq!(
+            fix_link_spacing(r#"Md link: #link("https://x")[text]"#, "markdown"),
+            r#"Md link: #link("https://x")[text]"#
+        );
+        // HTML: the whitespace comes from the source's formatting.
+        assert_eq!(
+            fix_link_spacing("Md link:\n#link(\"https://x\")[text]", "html"),
+            r#"Md link:#link("https://x")[text]"#
+        );
     }
 
     #[test]
@@ -820,6 +1038,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_post_process_typst_drops_undefined_anchor_links() {
+        // Pandoc renders `[text](#anchor)` as a label reference; Typst fails
+        // to compile when the label is not in the document.
+        let content = "= Install Now\n<install-now>\n\nGo to #link(<install-now>)[install] or \
+                       #link(<nope>)[missing];.\n\nBare #link(<gone>)\n";
+        let temp_dir = tempfile::tempdir().unwrap();
+        let processed = post_process_typst(content, temp_dir.path(), None)
+            .await
+            .unwrap();
+
+        // The anchor that has a heading keeps its link.
+        assert!(processed.contains("#link(<install-now>)[install]"));
+        // The dangling ones keep their text but lose the reference.
+        assert!(processed.contains("or #[missing];."));
+        assert!(processed.contains("Bare #[\\#gone]"));
+        assert!(!processed.contains("<nope>"));
+        assert!(!processed.contains("<gone>"));
+    }
+
+    #[tokio::test]
+    async fn test_post_process_typst_ignores_labels_inside_code_blocks() {
+        // `<html>` in a code block is printed text, not a label, so the link
+        // to `#html` is still dangling.
+        let content = "```xml\n<html>\n```\n\nSee #link(<html>)[b]\n";
+        let temp_dir = tempfile::tempdir().unwrap();
+        let processed = post_process_typst(content, temp_dir.path(), None)
+            .await
+            .unwrap();
+        assert!(processed.contains("See #[b]"));
+        assert!(processed.contains("```xml\n<html>\n```"));
+    }
+
+    #[tokio::test]
+    async fn test_post_process_typst_keeps_nested_brackets_of_anchor_links() {
+        let content = "#link(<nope>)[text with [nested] brackets]";
+        let temp_dir = tempfile::tempdir().unwrap();
+        let processed = post_process_typst(content, temp_dir.path(), None)
+            .await
+            .unwrap();
+        assert_eq!(processed, "#[text with [nested] brackets]");
+    }
+
+    #[tokio::test]
     async fn test_post_process_typst_mermaid() {
         let content = "```mermaid\ngraph TD;\n  A-->B;\n```\n\n````mermaid\ngraph TD;\n  A[\"```code```\"]-->B;\n````";
         let temp_dir = tempfile::tempdir().unwrap();
@@ -846,5 +1107,22 @@ mod tests {
         assert!(preamble.contains(r#"font: "Test Font", size: 9pt"#));
         assert!(preamble.contains("title: [My Title]"));
         assert!(preamble.contains(r#"authors: "author""#));
+    }
+
+    #[tokio::test]
+    async fn test_build_preamble_escapes_title_and_author() {
+        let options = PdfOptions::default();
+        let preamble = build_preamble(
+            &options,
+            "# xvc as a file server",
+            r#"feature/"quoted""#,
+            "#link(\"https://example.com\")[repo\\#1]",
+        )
+        .await;
+
+        assert!(preamble.contains("title: [\\# xvc as a file server]"));
+        assert!(preamble.contains(r#"authors: "feature/\"quoted\"""#));
+        // The date field is Typst markup from the caller and stays verbatim.
+        assert!(preamble.contains("date: [#link(\"https://example.com\")[repo\\#1]]"));
     }
 }

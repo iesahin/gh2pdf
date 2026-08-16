@@ -37,5 +37,13 @@ jobs:
     - name: Test
       run: cargo test
 
+    # inboxbot depends on this crate as a rendering library only; the
+    # library half has to keep building and passing without the server.
+    - name: Clippy (library only)
+      run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+    - name: Test (library only)
+      run: cargo test --no-default-features
+
     - name: Deploy script tests
       run: deploy/tests/deploy_sh_test.sh

@@ -157,6 +157,40 @@ fn format_local_datetime(timestamp: &DateTime<Utc>, tz_offset_hours: i32) -> Str
         .to_string()
 }
 
+/// Wraps `content` in a fenced code block that cannot be closed from inside.
+///
+/// A unified diff carries the fences of the files it touches as ordinary
+/// content lines: a Markdown file's ``` shows up as a context line whose only
+/// prefix is the diff's leading space, and CommonMark reads an indented run of
+/// backticks as a closing fence. A fixed three-backtick fence therefore ends at
+/// the first such line, and everything after it — the rest of that diff and
+/// every file below it — is re-parsed as prose, losing the leading `+`/`-`
+/// markers, the indentation and the monospaced font.
+///
+/// The fence written here is one backtick longer than the longest backtick run
+/// anywhere in `content` (never shorter than three), so no line inside the
+/// block can terminate it.
+fn fenced_code_block(language: &str, content: &str) -> String {
+    let longest_run = content
+        .chars()
+        .fold((0usize, 0usize), |(longest, current), c| {
+            if c == '`' {
+                (longest.max(current + 1), current + 1)
+            } else {
+                (longest, 0)
+            }
+        })
+        .0;
+    let fence = "`".repeat(longest_run.max(2) + 1);
+    format!(
+        "{}{}\n{}\n{}\n\n",
+        fence,
+        language,
+        content.trim_end_matches('\n'),
+        fence
+    )
+}
+
 /// Assembles the Markdown content for an issue or PR.
 ///
 /// Comment groups are always ordered from most recent to oldest; the first
@@ -202,9 +236,7 @@ pub fn assemble_markdown(
             ));
 
             if let Some(diff) = comment.diff_hunk {
-                md.push_str("```diff\n");
-                md.push_str(&diff);
-                md.push_str("\n```\n\n");
+                md.push_str(&fenced_code_block("diff", &diff));
             }
 
             md.push_str(&comment.body);
@@ -220,9 +252,7 @@ pub fn assemble_markdown(
             "## PR Diff: {} <- {}\n\n",
             diff_info.base_ref, diff_info.head_ref
         ));
-        md.push_str("```diff\n");
-        md.push_str(&diff_info.diff);
-        md.push_str("\n```\n\n");
+        md.push_str(&fenced_code_block("diff", &diff_info.diff));
     }
 
     md
@@ -490,6 +520,20 @@ fn content_block_at(content: &str, start: usize) -> Option<(&str, usize)> {
     None
 }
 
+/// Splits a fenced-block delimiter into its marker, length and info string.
+///
+/// Returns `None` for a line that does not start (after optional indentation)
+/// with a run of at least three backticks or tildes.
+fn fence_at(line: &str) -> Option<(char, usize, &str)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = trimmed.chars().take_while(|c| *c == marker).count();
+    if len < 3 {
+        return None;
+    }
+    Some((marker, len, trimmed[len..].trim()))
+}
+
 /// Collects the labels the document actually defines.
 ///
 /// Pandoc always writes a label at the end of a line — on its own after a
@@ -499,16 +543,26 @@ fn content_block_at(content: &str, start: usize) -> Option<(&str, usize)> {
 fn defined_labels(content: &str) -> HashSet<&str> {
     let label_re = Regex::new(r"<([^<>\s]+)>$").expect("static regex is valid");
     let mut labels = HashSet::new();
-    let mut in_raw_block = false;
+    let mut open_fence: Option<(char, usize)> = None;
 
     for line in content.lines() {
         let line = line.trim_end();
-        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-            in_raw_block = !in_raw_block;
-            continue;
-        }
-        if in_raw_block {
-            continue;
+        match (open_fence, fence_at(line)) {
+            // A block only ends on a bare fence of its own marker that is at
+            // least as long as the one that opened it — the shorter fences a
+            // diff of a Markdown file carries are content, not terminators.
+            (Some((marker, len)), Some((m, l, rest)))
+                if m == marker && l >= len && rest.is_empty() =>
+            {
+                open_fence = None;
+                continue;
+            }
+            (Some(_), _) => continue,
+            (None, Some((m, l, _))) => {
+                open_fence = Some((m, l));
+                continue;
+            }
+            (None, None) => {}
         }
         if let Some(caps) = label_re.captures(line) {
             let whole = caps.get(0).expect("group 0 always matches");
@@ -1207,6 +1261,54 @@ mod tests {
         assert!(md.contains("```diff\n@@ -1 +1 @@\n```"));
     }
 
+    /// A diff of a Markdown file carries that file's own fences as context
+    /// lines; a three-backtick block would end at the first of them and the
+    /// rest of the diff would be rendered as prose.
+    #[test]
+    fn test_assemble_markdown_fences_diff_containing_code_fences() {
+        let diff = concat!(
+            "--- a/README.md\n",
+            "+++ b/README.md\n",
+            "@@ -1,3 +1,3 @@\n",
+            " ```bash\n",
+            "-old\n",
+            "+new\n",
+            " ```\n",
+            "--- a/src/lib.rs\n",
+            "+pub fn b() {}"
+        );
+        let pr_diff = PRDiff {
+            base_ref: "main".into(),
+            head_ref: "feature".into(),
+            diff: diff.to_string(),
+        };
+        let md = assemble_markdown(None, vec![], "", Some(pr_diff), 3);
+        // The fence is longer than anything inside, so the whole diff — the
+        // files after the nested fence included — stays in one block.
+        assert!(md.contains(&format!("````diff\n{}\n````", diff)));
+    }
+
+    #[test]
+    fn test_assemble_markdown_fences_diff_hunk_containing_code_fences() {
+        let mut c = comment("2026-05-10T10:00:00Z", "a", "body", "u1");
+        c.diff_hunk = Some("@@ -1,2 +1,2 @@\n ```\n+added".to_string());
+        let md = assemble_markdown(None, vec![c], "", None, 3);
+        assert!(md.contains("````diff\n@@ -1,2 +1,2 @@\n ```\n+added\n````"));
+    }
+
+    #[test]
+    fn test_fenced_code_block_outgrows_the_longest_run_inside() {
+        // Three backticks stay the default when nothing inside needs more.
+        assert_eq!(fenced_code_block("diff", "+a"), "```diff\n+a\n```\n\n");
+        // A four-backtick run inside forces a five-backtick fence.
+        assert_eq!(
+            fenced_code_block("diff", "+a\n ````\n+b"),
+            "`````diff\n+a\n ````\n+b\n`````\n\n"
+        );
+        // A trailing newline does not leave a blank line before the fence.
+        assert_eq!(fenced_code_block("diff", "+a\n"), "```diff\n+a\n```\n\n");
+    }
+
     #[tokio::test]
     async fn test_post_process_typst_page_breaks() {
         let content = "Some content\n\nPAGEBREAKPLACEHOLDER\n\nOther content";
@@ -1260,6 +1362,30 @@ mod tests {
             .unwrap();
         assert!(processed.contains("See #[b]"));
         assert!(processed.contains("```xml\n<html>\n```"));
+    }
+
+    /// The label scanner has to survive the shorter fences a diff carries
+    /// inside a longer one: mistaking one for the end of the block would hide
+    /// every heading below it and defuse the links pointing at them.
+    #[tokio::test]
+    async fn test_post_process_typst_keeps_labels_after_nested_code_fences() {
+        let content = concat!(
+            "````diff\n",
+            " ```bash\n",
+            "+echo hi\n",
+            " ```\n",
+            "````\n\n",
+            "= Install Now\n",
+            "<install-now>\n\n",
+            "Go to #link(<install-now>)[install]"
+        );
+        let temp_dir = tempfile::tempdir().unwrap();
+        let processed = post_process_typst(content, temp_dir.path(), None)
+            .await
+            .unwrap();
+        // The heading below the diff still defines its label, so the link to
+        // it survives instead of being defused.
+        assert!(processed.contains("#link(<install-now>)[install]"));
     }
 
     #[tokio::test]

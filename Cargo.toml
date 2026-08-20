@@ -1,6 +1,6 @@
 [package]
 name = "gh2pdf"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "A GitHub App that converts issues and pull requests to PDFs and publishes them as release assets"
 license = "MIT"

@@ -83,12 +83,12 @@ Dangling anchor: [installation](#installation)
     assert!(renders("normal title", body, "urls-fragments").await);
 }
 
-/// A PR diff has to reach the PDF whole. A diff of a Markdown file carries
-/// that file's own fences, and a three-backtick block ends at the first of
-/// them — the files below it would then be typeset as prose, without their
-/// `+`/`-` markers.
+/// A PR diff has to reach the PDF whole, one page per file, with every line
+/// linked to the same line in the pull request's review view. A diff of a
+/// Markdown file carries that file's own fences, so the check also guards the
+/// content against being cut short by them.
 #[tokio::test]
-async fn pr_diffs_containing_code_fences_survive_the_pipeline() {
+async fn pr_diffs_render_one_linked_page_per_file() {
     if !tools_available() {
         eprintln!("skipping: pandoc/typst not installed");
         return;
@@ -114,6 +114,7 @@ async fn pr_diffs_containing_code_fences_survive_the_pipeline() {
         base_ref: "main".into(),
         head_ref: "feature".into(),
         diff: diff.to_string(),
+        files_url: Some("https://github.com/o/r/pull/3/files".into()),
     };
     let markdown = pdf::assemble_markdown(Some("Body."), vec![], "", Some(pr_diff), 0);
 
@@ -129,18 +130,32 @@ async fn pr_diffs_containing_code_fences_survive_the_pipeline() {
         .expect("the pipeline keeps its Typst source");
     let _ = std::fs::remove_dir_all(&work_dir);
 
-    // Every line of the diff is still inside one raw block, markers included.
-    let block_start = typst_source
-        .find("````diff")
-        .expect("the diff is fenced longer than the fences it contains");
-    let block = &typst_source[block_start..];
-    let block_end = block[8..].find("````").expect("the block is closed") + 8;
-    let block = &block[..block_end];
+    // Every line of the diff survived Pandoc inside the raw Typst block.
     for line in diff.lines() {
+        let quoted = format!("\"{}\"", line.replace('\\', "\\\\").replace('"', "\\\""));
         assert!(
-            block.contains(line),
-            "diff line missing from block: {}",
+            typst_source.contains(&quoted),
+            "diff line missing from the Typst source: {}",
             line
         );
     }
+
+    // The added line of src/lib.rs is line 1 of the new file; the removed one
+    // is line 1 of the old file.
+    let anchor = gh2pdf::diff::file_anchor("src/lib.rs");
+    assert!(typst_source.contains(&format!(
+        "#link(\"https://github.com/o/r/pull/3/files#{}R1\")",
+        anchor
+    )));
+    assert!(typst_source.contains(&format!(
+        "#link(\"https://github.com/o/r/pull/3/files#{}L1\")",
+        anchor
+    )));
+
+    // The second file starts on a page of its own.
+    let first = typst_source.find("README.md").expect("first file");
+    let second = typst_source
+        .rfind("last_line_of_the_diff")
+        .expect("second file");
+    assert!(typst_source[first..second].contains("#pagebreak()"));
 }

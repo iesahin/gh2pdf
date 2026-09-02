@@ -159,13 +159,13 @@ fn format_local_datetime(timestamp: &DateTime<Utc>, tz_offset_hours: i32) -> Str
 
 /// Wraps `content` in a fenced code block that cannot be closed from inside.
 ///
-/// A unified diff carries the fences of the files it touches as ordinary
-/// content lines: a Markdown file's ``` shows up as a context line whose only
-/// prefix is the diff's leading space, and CommonMark reads an indented run of
-/// backticks as a closing fence. A fixed three-backtick fence therefore ends at
-/// the first such line, and everything after it — the rest of that diff and
-/// every file below it — is re-parsed as prose, losing the leading `+`/`-`
-/// markers, the indentation and the monospaced font.
+/// The diff hunk a review comment quotes carries the fences of the file it
+/// comes from as ordinary content lines: a Markdown file's ``` shows up as a
+/// context line whose only prefix is the hunk's leading space, and CommonMark
+/// reads an indented run of backticks as a closing fence. A fixed
+/// three-backtick fence therefore ends at the first such line, and everything
+/// after it is re-parsed as prose, losing the leading `+`/`-` markers, the
+/// indentation and the monospaced font.
 ///
 /// The fence written here is one backtick longer than the longest backtick run
 /// anywhere in `content` (never shorter than three), so no line inside the
@@ -196,6 +196,9 @@ fn fenced_code_block(language: &str, content: &str) -> String {
 /// Comment groups are always ordered from most recent to oldest; the first
 /// comment of each group is timestamped with its full date so the reader
 /// can tell groups on different days apart.
+///
+/// A PR's diff closes the document, one page per changed file, with every
+/// line linked back into the review view — see [`crate::diff`].
 pub fn assemble_markdown(
     body: Option<&str>,
     comments: Vec<UnifiedComment>,
@@ -245,14 +248,13 @@ pub fn assemble_markdown(
     }
 
     if let Some(diff_info) = pr_diff {
-        if !md.is_empty() && !md.ends_with("PAGEBREAKPLACEHOLDER\n\n") {
-            md.push_str("PAGEBREAKPLACEHOLDER\n\n");
+        let rendered = crate::diff::render_pr_diff(&diff_info);
+        if !rendered.is_empty() {
+            if !md.is_empty() && !md.ends_with("PAGEBREAKPLACEHOLDER\n\n") {
+                md.push_str("PAGEBREAKPLACEHOLDER\n\n");
+            }
+            md.push_str(&rendered);
         }
-        md.push_str(&format!(
-            "## PR Diff: {} <- {}\n\n",
-            diff_info.base_ref, diff_info.head_ref
-        ));
-        md.push_str(&fenced_code_block("diff", &diff_info.diff));
     }
 
     md
@@ -697,14 +699,18 @@ pub async fn post_process_typst(
     for caps in link_cmd_re.captures_iter(&new_content) {
         let url = &caps[1];
         if url.starts_with("http://") || url.starts_with("https://") {
-            // Only download links that look like artifacts (files, assets, user-attachments)
-            let is_artifact = url.contains("/files/")
-                || url.contains("/assets/")
-                || url.contains("/user-attachments/")
-                || url.ends_with(".zip")
-                || url.ends_with(".pdf")
-                || url.ends_with(".gz")
-                || url.ends_with(".tar");
+            // Only download links that look like artifacts (files, assets,
+            // user-attachments). A URL carrying a fragment names a place on a
+            // page rather than a file — every line of a rendered PR diff
+            // links to one — so it is never fetched.
+            let is_artifact = !url.contains('#')
+                && (url.contains("/files/")
+                    || url.contains("/assets/")
+                    || url.contains("/user-attachments/")
+                    || url.ends_with(".zip")
+                    || url.ends_with(".pdf")
+                    || url.ends_with(".gz")
+                    || url.ends_with(".tar"));
 
             if is_artifact {
                 log::debug!("PDF: Identified potential artifact link: {}", url);
@@ -1254,18 +1260,25 @@ mod tests {
         let diff = PRDiff {
             base_ref: "main".into(),
             head_ref: "feature".into(),
-            diff: "@@ -1 +1 @@".into(),
+            diff: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n+added\n".into(),
+            files_url: Some("https://github.com/o/r/pull/3/files".into()),
         };
         let md = assemble_markdown(Some("Body"), vec![], "", Some(diff), 3);
         assert!(md.contains("## PR Diff: main <- feature"));
-        assert!(md.contains("```diff\n@@ -1 +1 @@\n```"));
+        // The diff opens on a page of its own, after the body's own break.
+        assert!(md.contains("PAGEBREAKPLACEHOLDER"));
+        assert!(md.contains("+added"));
+        assert!(md.contains(&format!(
+            "https://github.com/o/r/pull/3/files#{}R1",
+            crate::diff::file_anchor("x")
+        )));
     }
 
-    /// A diff of a Markdown file carries that file's own fences as context
-    /// lines; a three-backtick block would end at the first of them and the
-    /// rest of the diff would be rendered as prose.
+    /// A diff of a Markdown file carries that file's own fences as ordinary
+    /// content lines. They reach Typst inside string literals now, so no
+    /// fence of theirs can close the block the diff is rendered in.
     #[test]
-    fn test_assemble_markdown_fences_diff_containing_code_fences() {
+    fn test_assemble_markdown_keeps_a_diff_containing_code_fences_whole() {
         let diff = concat!(
             "--- a/README.md\n",
             "+++ b/README.md\n",
@@ -1274,18 +1287,26 @@ mod tests {
             "-old\n",
             "+new\n",
             " ```\n",
+            "diff --git a/src/lib.rs b/src/lib.rs\n",
             "--- a/src/lib.rs\n",
-            "+pub fn b() {}"
+            "+++ b/src/lib.rs\n",
+            "@@ -1 +1,2 @@\n",
+            "+pub fn b() {}\n"
         );
         let pr_diff = PRDiff {
             base_ref: "main".into(),
             head_ref: "feature".into(),
             diff: diff.to_string(),
+            files_url: None,
         };
         let md = assemble_markdown(None, vec![], "", Some(pr_diff), 3);
-        // The fence is longer than anything inside, so the whole diff — the
-        // files after the nested fence included — stays in one block.
-        assert!(md.contains(&format!("````diff\n{}\n````", diff)));
+        // Both files are rendered, the one below the nested fence included,
+        // and every line of the block starts a Typst grid cell rather than a
+        // fence that could end it.
+        assert!(md.contains(r#""-old""#));
+        assert!(md.contains(r#""+pub fn b() {}""#));
+        assert!(md.contains("`README.md`"));
+        assert!(md.contains("`src/lib.rs`"));
     }
 
     #[test]

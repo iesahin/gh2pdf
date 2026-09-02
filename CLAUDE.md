@@ -57,8 +57,9 @@ same code.
 | `main.rs` | CLI: `serve` (webhook server, App auth) and `convert` (one-shot with a PAT); all PDF options as clap args with `GH2PDF_*` env fallbacks |
 | `config.rs` | `PdfOptions` (every PDF-production parameter) + `PdfOptionsPatch` (per-repo `.github/gh2pdf.toml` overrides) |
 | `github.rs` | `GitHubProvider` trait hiding all GitHub access; `GitHubClient` (reqwest REST); `AppAuth` (App JWT → cached installation tokens); deep `publish_release_asset` (ensure release, purge stale assets, upload); `mock::MockGitHubClient` for tests |
-| `models.rs` | `UnifiedComment`, `IssueContext`, `PRContext`, `PRDiff`; REST response and webhook payload types |
-| `pdf.rs` | PDF pipeline: `assemble_markdown` → `compile_content_to_pdf` (pandoc → typst); `post_process_typst` (page breaks, mermaid, remote image download); `build_preamble`; `slugify`/`url_to_image_filename` naming helpers; failures carry the tool's own diagnostics (`tool_failure_message`) |
+| `models.rs` | `UnifiedComment`, `IssueContext`, `PRContext`, `PRDiff` (its `files_url` is what makes the diff's links possible); REST response and webhook payload types |
+| `diff.rs` | The PR diff: `split_diff` cuts a unified diff into one `FileDiff` per file and numbers every line on both sides; `file_anchor`/`pr_files_url` build GitHub's `#diff-<sha256 of path>` + `L`/`R<line>` anchors; `render_pr_diff` turns the whole thing into the Markdown that closes the PDF — a file index, then one page per file whose lines are a linked Typst grid |
+| `pdf.rs` | PDF pipeline: `assemble_markdown` (delegating a PR's diff to `diff`) → `compile_content_to_pdf` (pandoc → typst); `post_process_typst` (page breaks, mermaid, remote image download); `build_preamble`; `slugify`/`url_to_image_filename` naming helpers; failures carry the tool's own diagnostics (`tool_failure_message`) |
 | `pipeline.rs` | `convert_and_publish`: fetch context → render → publish asset → upsert description link; `effective_options` merges repo config over server defaults |
 | `description.rs` | The `<!-- gh2pdf:begin/end -->` link block: idempotent `upsert_pdf_link` writes it, `extract` reads the PDF URL back out |
 | `webhook.rs` | axum server: HMAC signature verification, event relevance filter, own-bot loop prevention, per-issue serialisation locks |
@@ -69,7 +70,7 @@ same code.
 rendering — `github`, `pipeline`, `webhook` and the binary — so a consumer
 that only wants PDFs depends on the crate with `default-features = false`
 and never pulls in axum, clap or jsonwebtoken. `config`, `description`,
-`models` and `pdf` are always compiled.
+`diff`, `models` and `pdf` are always compiled.
 
 ### Key design decisions
 
@@ -88,6 +89,13 @@ and never pulls in axum, clap or jsonwebtoken. `config`, `description`,
 - **Errors quote the tool** — a failing pandoc or typst run comes back as an
   error carrying that tool's own diagnostics, so a caller relaying the error
   (inboxbot sends it to a Telegram chat) says what actually broke.
+- **A PR diff is a linked grid, not a code block** — a code block is
+  verbatim, so nothing inside one can be a link. `diff::render_file_typst`
+  emits a raw Typst grid (line numbers, GitHub's row colours, the line
+  itself) where every row links to `…/pull/<n>/files#diff-<sha256 of the
+  path><L|R><line>`, the anchor GitHub gives that line in the review view.
+  The diff pages also narrow the page margins, since the wide sidenote
+  column a Tufte template keeps holds no diff.
 
 ## Engineering standards
 

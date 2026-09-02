@@ -12,6 +12,12 @@ Markdown, converted to [Typst](https://typst.app) with
 [Pandoc](https://pandoc.org), post-processed (page breaks between comment
 groups, mermaid diagrams, remote image download), and compiled to PDF.
 
+A pull request's diff closes the document with an index of the changed
+files and then **one page per file**. Every file and every line of it is a
+link into the PR's *Files changed* view, anchored at that exact line — so
+reading the PDF away from the screen and tapping a line takes you straight
+to where its review comment is written.
+
 ## How it works
 
 1. A webhook event arrives for an issue or PR (`issues`, `issue_comment`,

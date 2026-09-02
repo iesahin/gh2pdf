@@ -49,6 +49,7 @@ pub async fn convert_and_publish(
                 base_ref: pr.base_branch.clone(),
                 head_ref: pr.head_branch.clone(),
                 diff: pr.diff.clone(),
+                files_url: Some(crate::diff::pr_files_url(owner, repo, number)),
             })
         } else {
             None

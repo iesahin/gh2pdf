@@ -4,7 +4,8 @@
 //! GitHub App or as a rendering library:
 //!
 //! - **Always available**: [`pdf`] (Markdown assembly → pandoc → Typst →
-//!   PDF), [`models`] (the data the pipeline renders), [`config`] (every
+//!   PDF), [`diff`] (a PR diff split per file and linked back to GitHub),
+//!   [`models`] (the data the pipeline renders), [`config`] (every
 //!   knob that shapes a PDF) and [`description`] (the `gh2pdf` link block).
 //! - **Behind the default `server` feature**: [`github`], [`pipeline`] and
 //!   [`webhook`] — GitHub App authentication, release publishing, and the
@@ -15,6 +16,7 @@
 
 pub mod config;
 pub mod description;
+pub mod diff;
 pub mod models;
 pub mod pdf;
 

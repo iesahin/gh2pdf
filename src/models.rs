@@ -37,11 +37,19 @@ impl UnifiedComment {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PRDiff {
     pub base_ref: String,
     pub head_ref: String,
     pub diff: String,
+    /// The pull request's *Files changed* page
+    /// (`https://github.com/<owner>/<repo>/pull/<n>/files`).
+    ///
+    /// When set, every file and every line of the rendered diff links into
+    /// it, so a line in the PDF opens on the line in the review view where
+    /// its comment button is. Without it the diff renders unlinked.
+    #[serde(default)]
+    pub files_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

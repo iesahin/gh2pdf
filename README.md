@@ -22,12 +22,15 @@ to where its review comment is written.
 
 1. A webhook event arrives for an issue or PR (`issues`, `issue_comment`,
    `pull_request`, `pull_request_review`, `pull_request_review_comment`).
-2. gh2pdf authenticates as the App installation, fetches the full issue/PR
+2. gh2pdf waits until the issue/PR has been quiet for `--quiet-period`
+   seconds (`GH2PDF_QUIET_PERIOD`, default `120`); any further event about it
+   within that window restarts the wait, so a burst of edits yields one PDF.
+3. gh2pdf authenticates as the App installation, fetches the full issue/PR
    context (body, comments, reviews, diff), and renders the PDF.
-3. The PDF is uploaded as `<repo>-<number>-<title-slug>.pdf` to the release
+4. The PDF is uploaded as `<repo>-<number>-<title-slug>.pdf` to the release
    tagged `gh2pdf` (configurable). Older PDFs of the same issue/PR are
    replaced, so the release holds exactly one current PDF per issue.
-4. A link block is inserted into (or updated in) the issue/PR description:
+5. A link block is inserted into (or updated in) the issue/PR description:
 
    ```
    <!-- gh2pdf:begin -->

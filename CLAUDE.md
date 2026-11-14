@@ -62,7 +62,7 @@ same code.
 | `pdf.rs` | PDF pipeline: `assemble_markdown` (delegating a PR's diff to `diff`) → `compile_content_to_pdf` (pandoc → typst); `post_process_typst` (page breaks, mermaid, remote image download); `build_preamble`; `slugify`/`url_to_image_filename` naming helpers; failures carry the tool's own diagnostics (`tool_failure_message`) |
 | `pipeline.rs` | `convert_and_publish`: fetch context → render → publish asset → upsert description link; `effective_options` merges repo config over server defaults |
 | `description.rs` | The `<!-- gh2pdf:begin/end -->` link block: idempotent `upsert_pdf_link` writes it, `extract` reads the PDF URL back out |
-| `webhook.rs` | axum server: HMAC signature verification, event relevance filter, own-bot loop prevention, per-issue serialisation locks |
+| `webhook.rs` | axum server: HMAC signature verification, event relevance filter, own-bot loop prevention, per-issue quiet-period debounce and serialisation locks |
 
 ### Cargo features
 
@@ -82,6 +82,9 @@ and never pulls in axum, clap or jsonwebtoken. `config`, `description`,
 - **Loop prevention** — the app's own description edits arrive back as
   `edited` webhook events; events whose sender is the configured bot login
   (`--bot-login`, default `gh2pdf[bot]`) are skipped.
+- **Quiet-period debounce** — each relevant event restarts a per-issue timer
+  (`--quiet-period`, default 120 s); only when it expires does a conversion
+  run, so a burst of edits renders one PDF.
 - **Per-issue locks** — concurrent webhook events about the same issue are
   serialised; each run fetches fresh state so the last run converges.
 - **Scratch directories** — each conversion works in its own temp directory,

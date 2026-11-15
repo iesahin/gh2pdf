@@ -107,6 +107,11 @@ struct ServeArgs {
     #[arg(long, env = "GH2PDF_BOT_LOGIN", default_value = "gh2pdf[bot]")]
     bot_login: String,
 
+    /// Seconds an issue/PR must go without new events before its PDF is
+    /// rendered; each new event within this window restarts the wait.
+    #[arg(long, env = "GH2PDF_QUIET_PERIOD", default_value_t = 120)]
+    quiet_period: u64,
+
     #[command(flatten)]
     pdf: PdfArgs,
 }
@@ -147,6 +152,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         args.webhook_secret,
         args.pdf.into(),
         args.bot_login,
+        std::time::Duration::from_secs(args.quiet_period),
     ));
     webhook::serve(state, args.port).await
 }

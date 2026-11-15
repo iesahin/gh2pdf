@@ -14,7 +14,9 @@ use axum::Router;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// Everything the webhook handlers need, shared across requests.
@@ -25,6 +27,10 @@ pub struct AppState {
     /// Login of this app's bot account (e.g. `gh2pdf[bot]`); events it sends
     /// are ignored so description updates do not trigger endless re-renders.
     pub bot_login: String,
+    /// How long an issue/PR must stay quiet before it is rendered; every new
+    /// event about it within this window restarts the wait.
+    pub quiet_period: Duration,
+    debouncer: Debouncer,
     /// Per-issue locks so concurrent events about the same issue/PR are
     /// serialised; each run fetches fresh state, so later runs converge.
     issue_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -36,12 +42,15 @@ impl AppState {
         webhook_secret: String,
         options: PdfOptions,
         bot_login: String,
+        quiet_period: Duration,
     ) -> Self {
         Self {
             app_auth,
             webhook_secret,
             options,
             bot_login,
+            quiet_period,
+            debouncer: Debouncer::default(),
             issue_locks: Mutex::new(HashMap::new()),
         }
     }
@@ -49,6 +58,51 @@ impl AppState {
     async fn lock_for(&self, key: &str) -> Arc<Mutex<()>> {
         let mut locks = self.issue_locks.lock().await;
         locks.entry(key.to_string()).or_default().clone()
+    }
+}
+
+/// Trailing-edge debouncer keyed by issue: `schedule` runs a job only once no
+/// newer job has been scheduled under the same key for the whole delay.
+/// Scheduling again within the delay supersedes (drops) the earlier job, so a
+/// burst of edits produces a single conversion after the burst ends.
+#[derive(Default, Clone)]
+struct Debouncer {
+    generations: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+}
+
+impl Debouncer {
+    fn bump(&self, key: &str) -> u64 {
+        let mut g = self.generations.lock().unwrap_or_else(|e| e.into_inner());
+        let gen = g.entry(key.to_string()).or_insert(0);
+        *gen += 1;
+        *gen
+    }
+
+    /// True (and forgets the key) when `gen` is still the latest job for it.
+    fn claim(&self, key: &str, gen: u64) -> bool {
+        let mut g = self.generations.lock().unwrap_or_else(|e| e.into_inner());
+        if g.get(key) == Some(&gen) {
+            g.remove(key);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn schedule<F>(&self, key: String, delay: Duration, job: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let gen = self.bump(&key);
+        let this = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            if this.claim(&key, gen) {
+                job.await;
+            } else {
+                log::debug!("Webhook: {} superseded by a newer event", key);
+            }
+        });
     }
 }
 
@@ -143,8 +197,12 @@ async fn handle_webhook(
         number
     );
 
-    tokio::spawn(async move {
-        let key = format!("{}/{}#{}", owner, repo, number);
+    let key = format!("{}/{}#{}", owner, repo, number);
+    let delay = state.quiet_period;
+    let job_state = state.clone();
+    let job_key = key.clone();
+    let job = async move {
+        let (state, key) = (job_state, job_key);
         let lock = state.lock_for(&key).await;
         let _guard = lock.lock().await;
 
@@ -157,7 +215,10 @@ async fn handle_webhook(
         {
             log::error!("Webhook: Conversion failed for {}: {:#}", key, e);
         }
-    });
+    };
+    // Each event restarts the quiet-period timer; only the last event of a
+    // burst renders, and it fetches fresh state, so nothing is lost.
+    state.debouncer.schedule(key, delay, job);
 
     StatusCode::ACCEPTED
 }
@@ -217,6 +278,58 @@ mod tests {
         assert!(!is_relevant("pull_request", Some("assigned")));
         assert!(!is_relevant("push", Some("created")));
         assert!(!is_relevant("issues", None));
+    }
+
+    async fn run_debounced(schedule_at: &[u64], keys: &[&str]) -> Vec<String> {
+        let debouncer = Debouncer::default();
+        let ran = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut last = 0;
+        for (i, (&at, &key)) in schedule_at.iter().zip(keys).enumerate() {
+            tokio::time::sleep(Duration::from_secs(at - last)).await;
+            last = at;
+            let ran = ran.clone();
+            let label = format!("{}:{}", key, i);
+            debouncer.schedule(key.to_string(), Duration::from_secs(120), async move {
+                ran.lock().unwrap().push(label);
+            });
+        }
+        tokio::time::sleep(Duration::from_secs(1000)).await;
+        let out = ran.lock().unwrap().clone();
+        assert!(debouncer.generations.lock().unwrap().is_empty());
+        out
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_debouncer_runs_only_last_event_of_a_burst() {
+        // Events 100 s apart keep resetting the 120 s timer.
+        let ran = run_debounced(&[0, 100, 200], &["a", "a", "a"]).await;
+        assert_eq!(ran, vec!["a:2"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_debouncer_runs_each_event_after_quiet_period() {
+        let ran = run_debounced(&[0, 121], &["a", "a"]).await;
+        assert_eq!(ran, vec!["a:0", "a:1"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_debouncer_keys_are_independent() {
+        let ran = run_debounced(&[0, 10, 20], &["a", "b", "a"]).await;
+        assert_eq!(ran, vec!["b:1", "a:2"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_debouncer_waits_full_quiet_period() {
+        let debouncer = Debouncer::default();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        debouncer.schedule("a".into(), Duration::from_secs(120), async move {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        tokio::time::sleep(Duration::from_secs(119)).await;
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

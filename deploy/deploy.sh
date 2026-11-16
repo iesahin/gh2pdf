@@ -64,7 +64,7 @@ REPO_URL="https://github.com/iesahin/gh2pdf"
 BRANCH="main"
 DOMAIN=""
 EMAIL=""
-PORT="8080"
+PORT="11701"
 
 PANDOC_VERSION="${PANDOC_VERSION:-3.6.3}"
 TYPST_VERSION="${TYPST_VERSION:-0.13.1}"
